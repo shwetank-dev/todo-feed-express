@@ -4,6 +4,7 @@
   "description": "",
   "main": "dist/index.js",
   "scripts": {
+    "start": "node dist/server.js",
     "dev": "npx tsx watch --env-file=.env src/server.ts",
     "db:generate-migration": "npx drizzle-kit generate",
     "db:apply-migrations": "source .env && export DATABASE_URL && npx drizzle-kit migrate",
