@@ -1,6 +1,6 @@
 import express from "express";
 import { config } from "@/config.js";
-import { dbHealthCheck } from "@/db.js";
+import { dbHealthCheck } from "@/db-client.js";
 import { logger } from "@/logger.js";
 
 const app = express();
