@@ -78,12 +78,12 @@ before any real logic exists. Skipping this means debugging deploy issues and
 business-logic bugs at the same time later — worse for learning either one.
 
 Actual state (deviations from the plan below, for context in future
-sessions): `db.ts` ended up living flat at `src/db.ts`, not `src/db/db.ts`
-(only `schema.ts` stayed under `src/db/` — singular composition-root files
-like `db.ts`/`config.ts`/`logger.ts` stay flat at `src/` root; folders are
-reserved for things expected to multiply, like `schemas/`/`services/`).
-`/health` and `/health/db` were deliberately merged into one `GET /health`
-route returning `{ server, db }` (user's call, understood the diagnostic
+sessions): the DB composition root ended up at `src/db-client.ts` (flat at
+`src/` root, not `src/db/db.ts` — singular composition-root files like
+`db-client.ts`/`config.ts`/`logger.ts` stay flat; folders are reserved for
+things expected to multiply, like feature modules). `/health` and
+`/health/db` were deliberately merged into one `GET /health` route
+returning `{ server, db }` (user's call, understood the diagnostic
 trade-off of not being able to isolate HTTP-layer-vs-DB failures). Deploy
 target used: **Render** (Postgres + web service both on Render). Extra
 tooling added beyond the base roadmap, not roadmap-required but now part of
@@ -96,6 +96,13 @@ no `Logger` interface — same reasoning, add the abstraction when a real
 call site needs it), and a compiled-JS deploy path (`tsc && tsc-alias` for
 build, `node dist/server.js` for start — chosen over running `tsx` directly
 in production).
+
+Dev/prod DB split: two separate databases on the **same** Render Postgres
+instance (not two instances) — `todolist_feed` (prod, used by the deployed
+Render web service) and `todolist_feed_dev` (local dev, used by `.env`).
+Created via `CREATE DATABASE todolist_feed_dev;` in `psql`. Local schema
+work/migrations should always run against `_dev`, never prod, until a
+change is deliberately ready to ship.
 
 ### Phase 0.1 — Project scaffold ✅ DONE
 - Problem: nothing exists yet; TypeScript + Express need wiring before any
@@ -156,13 +163,29 @@ Motivation: this is the first real business logic, and the first place the
 DI discipline from Stage 0 gets tested against actual services and actual
 tests.
 
-### Phase 1.1 — Schema
+### Phase 1.1 — Schema ✅ DONE
 - Task: Drizzle schema for `users` (id, name — no password) in
   `src/modules/users/schema.ts`, and `todo_lists` (id, owner_id, name) +
   `todos` (id, list_id, text, done) in `src/modules/todos/schema.ts`.
 - Completion: schema migrates cleanly against the DB from Stage 0.
+- Actual state: filenames are `<module>.db-schema.ts` (not `schema.ts` —
+  see folder shape at top of file). All `id` columns are
+  `uuid().defaultRandom()`, not integer identity (deliberate — user-facing
+  IDs like `GET /users/:id/feed` shouldn't be sequential/guessable).
+  `todo_lists.owner_id` and `todos.list_id` both have explicit indexes
+  (Drizzle/Postgres don't auto-index FK columns, unlike Prisma — had to add
+  `index(...)` manually). Client-wide `casing: "snake_case"` is set in both
+  `db-client.ts` and `drizzle.config.ts`, so schema files use bare
+  `uuid()`/`text()`/`boolean()` with no explicit column-name strings —
+  Drizzle derives `owner_id`/`list_id`/etc. from the camelCase JS property
+  names automatically. Cross-module FK: `todos.db-schema.ts` imports
+  `users` from `modules/users/` (one-directional — `users` never imports
+  from `todos`; that direction is a deliberate rule, not accidental).
+  Migrations applied and confirmed against the dev DB
+  (`todolist_feed_dev`). Old throwaway `ping` table and `src/db/schema.ts`
+  removed.
 
-### Phase 1.2 — Services with DI
+### Phase 1.2 — Services with DI ✅ DONE
 - Problem: if route handlers talk to Drizzle directly, business logic and
   HTTP concerns tangle together, and nothing is mockable in tests.
 - Concept: each route handler depends on a `service` (e.g. `TodoService`),
@@ -174,6 +197,15 @@ tests.
   parameter.
 - Completion: no service file imports `db` directly from `db.ts` — it's
   always passed in.
+- Actual state: `createTodoService(dbClient)` in
+  `src/modules/todos/todos.service.ts`, `DbClient` type exported from
+  `db-client.ts` itself (`ReturnType<typeof createDbClient>`) — single
+  source of truth for the type, not re-derived per service file. Six
+  operations built: `createList`, `getListById`, `getListsByOwner`,
+  `addTodo`, `toggleTodo`, `deleteTodo`. `toggleTodo` flips `done` inside
+  the SQL itself (`sql\`not ${todos.done}\``) rather than reading then
+  writing back — avoids a race condition between concurrent toggles. No
+  `users.service.ts` yet — not needed until routes actually require it.
 
 ### Phase 1.3 — Vitest starts here
 - Concept: this is the payoff of the DI discipline — because services take
@@ -183,6 +215,54 @@ tests.
   writing route tests (or instead of them, for now).
 - Completion: a handful of passing Vitest tests exercise `TodoService`
   directly, with a test DB injected — not the production one.
+- **User's explicit call: route-level integration tests via `supertest`
+  instead of (not in addition to, for now) direct service-layer unit
+  tests.** Real HTTP requests hit real Express routes, which hit real
+  services, which hit a real test database — no mocking of Drizzle or the
+  service layer. This is still exercising the same DI wiring (the test DB
+  is injected via the same `createDbClient` factory as prod/dev), just
+  proven through the HTTP layer rather than by calling service functions
+  directly.
+- **Consequence of that choice**: routes must exist before they can be
+  tested, so build Stage 1.4 (and Stage 1.5's auth) *before* writing these
+  tests — the actual execution order deviates from this file's phase
+  numbering here, and that's fine, don't force strict numeric order over
+  what the user's testing strategy actually requires.
+- **Consequence of that choice, part 2**: `server.ts` needs restructuring
+  so the Express `app` is buildable/exportable separately from the
+  `.listen()` call — `supertest` makes in-memory requests directly against
+  an `app` object, no real port needed. Only the real entry point should
+  call `.listen()`; tests import the app-building function directly.
+- **Test data strategy — decide and document this, don't wing it per
+  test file:**
+  - **Separate test database**, same pattern as the existing dev/prod
+    split (e.g. `todolist_feed_test` on the same Render instance),
+    migrated the same way. Tests must never run against `_dev` or prod.
+  - **Isolation between tests** — pick one deliberately, don't let it be
+    accidental:
+    - *Truncate all tables in `beforeEach`/`afterEach`* — simplest to wire
+      for route-level tests going through the full app stack (the app's
+      `dbClient` is built once at module load, not per-test, so a
+      per-test-transaction approach is awkward here unless the whole
+      request pipeline is made to run inside one transaction per test).
+    - *Transaction-per-test with rollback* — cleaner/more robust in
+      principle (nothing ever actually commits), but harder to wire
+      through a full HTTP-request stack than through direct service calls,
+      since every layer (route → service → dbClient) needs to share the
+      same transaction for the duration of one test. Worth attempting only
+      if truncate-based isolation becomes a real pain point later — don't
+      reach for this upfront.
+  - **Seeding strategy** — how does a test get a real user to own a list?
+    - *Through the real API* (register via `POST /auth/register`, use the
+      returned token) — more genuinely "integration," couples every test's
+      setup to auth/registration working correctly, slower.
+    - *Direct DB insert bypassing the API* — faster, more isolated from
+      unrelated auth bugs, but not exercising real registration behavior
+      as part of setup.
+    - Pick one per test file based on what that file is actually trying to
+      prove — a test *of* `/auth/register` itself obviously must go
+      through the real API; a test of `POST /lists` probably shouldn't
+      also be silently testing registration as a side effect.
 
 ### Phase 1.4 — Routes
 - Task: thin routes in `src/modules/todos/routes.ts` and
@@ -192,9 +272,24 @@ tests.
   yet at this point (that's Stage 1.5, next) — `userId` comes from a request
   field/header for now, same as the rest of this roadmap until 1.5 lands.
   `server.ts` (the composition root) mounts each module's router.
+- Note: all of the routes listed above are todos-domain operations (even
+  `GET /users/:id/lists` — it calls `todoService.getListsByOwner`, not
+  anything user-specific), so `users.routes.ts` is minimal at this point:
+  just whatever plain user-data endpoints are needed (e.g. `GET /users/:id`)
+  — user *creation* happens via Stage 1.5's `POST /auth/register`, not a
+  bare `POST /users`, since auth is being built immediately after this
+  phase rather than deferred.
 - Completion (Stage 1 done when): you can create a list, add todos, toggle
   them, and see it persist across server restarts — verified both by manual
   requests and by the Vitest service tests from 1.3.
+- Extra hardening added beyond the base roadmap, not roadmap-required but
+  now part of the project: **`helmet`** (sets standard security-related
+  response headers — HSTS, `X-Content-Type-Options`, clickjacking
+  protection, removes the `X-Powered-By` header — wired into the
+  composition root in `app.ts`, ahead of all routes) and a catch-all
+  **404 handler** (`app.use((_req, res) => res.status(404).json(...))`,
+  the very last middleware in `app.ts`, so it only fires for requests
+  nothing else matched).
 
 Offer a Stage 1 summary before moving on.
 
@@ -219,13 +314,22 @@ machinery, that's scope creep — stop and flag it, don't build it.
 ### Phase 1.5.2 — `auth` module
 - Task: new `src/modules/auth/service.ts` (register: hash + create user;
   login: look up user, compare password hash) and
-  `src/modules/auth/routes.ts` (`POST /auth/register`, `POST /auth/login`).
+  `src/modules/auth/routes.ts` (`POST /auth/register`, `POST /auth/login`,
+  and `GET /auth/me` — returns the authenticated user for the current
+  token; lives in `auth`, not `users`, because resolving identity from a
+  token is an auth concern, not a user-data concern, and it avoids the
+  Express routing-order gotcha `GET /users/me` would have against
+  `GET /users/:id`).
 - Concept: `auth` depends on `users` (to create/look up user records) —
   one-directional, same cross-module rule as `todos` depending on `users`.
-  `users` never imports from `auth`.
+  `users` never imports from `auth`. No `POST /auth/logout` — with
+  access-token-only, no-refresh, no-revocation-list auth, there's no
+  server-side session to invalidate; "logout" is just the client
+  discarding the token.
 - Completion: `POST /auth/register` creates a user with a hashed password;
   `POST /auth/login` with correct credentials succeeds, wrong credentials
-  return 401.
+  return 401; `GET /auth/me` with a valid token returns that user, with no
+  token returns 401.
 
 ### Phase 1.5.3 — Issue a signed access token
 - Concept: on successful login, issue one signed access token (e.g. JWT)
@@ -259,6 +363,61 @@ machinery, that's scope creep — stop and flag it, don't build it.
   input anywhere in the codebase again.
 
 Offer a Stage 1.5 summary before moving on to Stage 2.
+
+---
+
+## Stage 1.6 — Error tracking (Sentry)
+
+Motivation: once Stage 1's CRUD routes are live, there's real surface area
+for production bugs beyond a health check — Sentry gives visibility into
+those without hand-checking logs. Not worth adding earlier; there's nothing
+meaningful to monitor before real routes exist.
+
+### Phase 1.6.1 — Install & init
+- Task: install `@sentry/node`; call `Sentry.init(...)` at the very top of
+  `server.ts`, before anything else — same composition-root instinct as
+  `config.ts`/`logger.ts`. DSN comes from a new Zod-validated env var in
+  `config.ts` (e.g. `SENTRY_DSN`), not hardcoded.
+- Completion: a deliberately thrown test error shows up in the Sentry
+  dashboard.
+
+### Phase 1.6.2 — Environment + sampling
+- Task: pass `environment: config.ENVIRONMENT` into `Sentry.init(...)`, and
+  set a conservative `tracesSampleRate` for production (not `1.0` — that's
+  expensive/noisy at real traffic volume).
+- Completion: dev errors and prod errors are distinguishable in Sentry via
+  the environment tag.
+
+### Phase 1.6.3 — Scrub sensitive data
+- Task: use Sentry's `beforeSend` hook to strip passwords, tokens, and the
+  DB connection string out of captured request/error data before it's sent.
+- Completion: a manually triggered error containing a fake secret in its
+  payload does not show that secret in the Sentry dashboard.
+
+### Phase 1.6.4 — Operational vs unexpected errors (design checkpoint)
+- Concept: not every error is a bug. A 400 from bad input (Stage 2's
+  `validateBody`) or a 401 from `requireAuth` is expected, user-facing
+  behavior — reporting those to Sentry as "errors" is just noise. This is
+  the concrete motivating case for a small `AppError`/`OperationalError`
+  class hierarchy (deferred earlier in the roadmap for being premature —
+  it's not premature anymore once Sentry exists to feed).
+- Task: distinguish operational errors from unexpected exceptions in the
+  app's error-handling middleware; only call `Sentry.captureException` for
+  the unexpected ones.
+- Completion: a validation 400 does not create a Sentry event; a genuinely
+  unhandled exception does.
+
+### Phase 1.6.5 — Middleware ordering, releases, source maps
+- Task: wire Sentry's request handler early in the Express middleware
+  chain, and its error handler after all routes but before your own final
+  error-handling middleware. Tag each deploy with a release
+  version/commit SHA. Upload source maps as part of the `tsc`/`tsc-alias`
+  build step so stack traces show original TypeScript lines, not compiled
+  JS.
+- Completion (Stage 1.6 done when): a deployed error shows the correct
+  original TypeScript file/line in Sentry, tagged with the correct release.
+
+Offer a Stage 1.6 summary before moving on to Stage 2.
 
 ---
 
@@ -308,6 +467,40 @@ independently-drifting definitions.
   could be lifted out and shared with a client untouched.
 
 Offer a Stage 2 summary before moving on.
+
+---
+
+## Stage 2.5 — API docs (Swagger/OpenAPI)
+
+Motivation: Stage 2 already produced a single source of truth (Zod schemas)
+for validation and types — generating API docs from those same schemas
+avoids a third, independently-drifting definition (hand-written docs rot
+the moment someone changes a schema and forgets to update them).
+
+### Phase 2.5.1 — Generate an OpenAPI spec from Zod
+- Task: derive an OpenAPI document from each module's `validation.ts`
+  schemas — don't hand-write a separate spec. Use a Zod-to-OpenAPI tool
+  (e.g. `zod-to-openapi`, or Zod v4's built-in `z.toJSONSchema()`) as the
+  bridge.
+- Completion: an OpenAPI JSON/YAML document exists, generated from the
+  existing validation schemas, describing every mutating route's input
+  shape.
+
+### Phase 2.5.2 — Serve interactive docs
+- Task: mount `swagger-ui-express` (or similar) at a route like `GET /docs`,
+  serving the generated spec.
+- Completion: hitting `/docs` on the deployed app shows an interactive,
+  browsable API reference.
+
+### Phase 2.5.3 — Keep it honest
+- Check question: "what happens to `/docs` if you change a Zod schema's
+  field, versus if you'd hand-written a separate OpenAPI YAML file?" (same
+  shape as Stage 2.3's check question about types — same payoff).
+- Completion (Stage 2.5 done when): every mutating route from Stage 1/1.5
+  appears in `/docs`, generated — not hand-written — from the same Zod
+  schemas used for real request validation.
+
+Offer a Stage 2.5 summary before moving on.
 
 ---
 
@@ -407,3 +600,50 @@ Offer a Stage 4 (final) summary.
   it's much easier to verify DI is done right (*can I inject a fake here?*)
   incrementally than to retrofit it later. If a phase's completion criterion
   doesn't mention tests, still ask whether a quick one is worth adding.
+
+### Testing philosophy (the "why" behind Phase 1.3's practices)
+
+User's explicit call: route-level integration tests via `supertest`, real
+HTTP requests through real Express routes, through real services, against
+a real test database — no mocking Drizzle, no mocking the service layer.
+The reasoning behind each specific practice, worth actually explaining to
+the user when this comes up again, not just enforcing silently:
+
+- **Why a separate test database, never dev/prod**: two distinct reasons.
+  Safety — tests create/mutate/delete data constantly; pointing that at
+  dev/prod risks destroying real work-in-progress data. And correctness —
+  tests need a *known* starting state for assertions to mean anything. If
+  the DB has whatever leftover junk exists from prior manual testing, an
+  assertion like "`getListsByOwner` returns exactly 2 lists" becomes
+  unreliable, since it silently depends on what else happens to be in the
+  table.
+- **Why isolation between tests matters**: without it, tests develop a
+  hidden dependency on *execution order* and on each other's leftover
+  state. Test A creates a user; test B, written independently, assumes a
+  clean `users` table and fails on a duplicate-constraint — but only
+  sometimes, only when run after test A, only in a certain order. This is
+  the classic "flaky test" failure mode, and it's almost always caused by
+  missing isolation, not by an actual bug in the code under test. Two
+  concrete strategies (pick one deliberately, see Phase 1.3 for the
+  route-testing-specific tradeoff): truncate all tables between tests, or
+  wrap each test in a transaction that's rolled back afterward so nothing
+  ever actually commits.
+- **Why the seeding strategy is a real decision, not an afterthought**:
+  every test that needs a user/list/todo to already exist has to create it
+  somehow. Going through the real API (e.g. `POST /auth/register`) is more
+  faithful to actual usage but makes every other test's setup silently
+  depend on registration working correctly — a bug in registration would
+  cause unrelated test failures everywhere, which is confusing to debug.
+  Inserting directly into the test DB, bypassing the API, is faster and
+  keeps each test's failure meaningfully scoped to what it's actually
+  testing — at the cost of not exercising real registration behavior as a
+  side effect. Neither is universally correct; pick per test file based on
+  what that file is actually trying to prove.
+- **Why real HTTP requests via `supertest` instead of mocking**: mocking
+  the DB or the service layer means the test can pass even when the real
+  wiring between HTTP → route → service → DB is broken — you'd only be
+  testing that your mock behaves the way you told it to, not that the
+  actual system works. Real requests against a real (test) database catch
+  real integration bugs: wrong status codes, foreign key violations,
+  serialization issues, middleware ordering mistakes — none of which a
+  mocked test can see.

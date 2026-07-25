@@ -15,6 +15,27 @@
       "when": 1784679230256,
       "tag": "0001_wealthy_lily_hollister",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784747958056,
+      "tag": "0002_add todos table",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784752080455,
+      "tag": "0003_add_password_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784931352079,
+      "tag": "0004_make_users.name_unique",
+      "breakpoints": true
     }
   ]
 }
