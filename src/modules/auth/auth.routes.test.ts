@@ -17,7 +17,8 @@ describe("POST /api/auth/register", () => {
       .send({ name: "test-user", password: "test-password" });
 
     expect(res.status).toBe(201);
-    expect(res.body.name).toBe("test-user");
+    expect(res.body.user.name).toBe("test-user");
+    expect(typeof res.body.token).toBe("string");
   });
 
   it("returns 409 when the name is already taken", async () => {
@@ -45,6 +46,7 @@ describe("POST /api/auth/login", () => {
       .send({ name: TEST_USER, password: TEST_PASSWORD });
 
     expect(res.status).toBe(200);
+    expect(res.body.user.name).toBe(TEST_USER);
     expect(typeof res.body.token).toBe("string");
   });
 

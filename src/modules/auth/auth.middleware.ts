@@ -12,6 +12,14 @@ declare global {
   }
 }
 
+export function assertUserId(
+  req: Request,
+): asserts req is Request & { userId: string } {
+  if (!req.userId) {
+    throw new UnauthenticatedError("missing token");
+  }
+}
+
 export function requireAuth(req: Request, _res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith("Bearer ")

@@ -1,6 +1,8 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import type { DbClient } from "@/infra/db-client.js";
+import { paginateRows } from "@/lib/pagination.js";
 import { todoLists, todos } from "./todos.db-schema.js";
+import type { ListTodosQuery } from "./todos.validation.js";
 
 export function createTodoService(dbClient: DbClient) {
   return {
@@ -25,11 +27,22 @@ export function createTodoService(dbClient: DbClient) {
       return list;
     },
 
-    getListsByOwner: async (ownerId: string) => {
-      return dbClient
+    getListsByOwner: async (
+      ownerId: string,
+      { cursor, limit }: ListTodosQuery,
+    ) => {
+      const rows = await dbClient
         .select()
         .from(todoLists)
-        .where(eq(todoLists.ownerId, ownerId));
+        .where(
+          cursor
+            ? and(eq(todoLists.ownerId, ownerId), gt(todoLists.id, cursor))
+            : eq(todoLists.ownerId, ownerId),
+        )
+        .orderBy(todoLists.id)
+        .limit(limit + 1);
+
+      return paginateRows(rows, limit);
     },
 
     addTodo: async (listId: string, text: string, ownerId: string) => {

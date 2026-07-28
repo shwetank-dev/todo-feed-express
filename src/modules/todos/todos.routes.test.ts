@@ -36,7 +36,8 @@ describe("GET /api/lists", () => {
       .set("Authorization", `Bearer ${auth.token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(1);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.nextCursor).toBeNull();
   });
 
   it("does not return another user's lists", async () => {
@@ -48,7 +49,30 @@ describe("GET /api/lists", () => {
       .set("Authorization", `Bearer ${intruder.token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(0);
+    expect(res.body.items).toHaveLength(0);
+    expect(res.body.nextCursor).toBeNull();
+  });
+
+  it("paginates with a cursor when there are more lists than the limit", async () => {
+    await createTestList(auth.user.id, "list-a");
+    await createTestList(auth.user.id, "list-b");
+    await createTestList(auth.user.id, "list-c");
+
+    const firstPage = await request(app)
+      .get("/api/lists?limit=2")
+      .set("Authorization", `Bearer ${auth.token}`);
+
+    expect(firstPage.status).toBe(200);
+    expect(firstPage.body.items).toHaveLength(2);
+    expect(firstPage.body.nextCursor).not.toBeNull();
+
+    const secondPage = await request(app)
+      .get(`/api/lists?limit=2&cursor=${firstPage.body.nextCursor}`)
+      .set("Authorization", `Bearer ${auth.token}`);
+
+    expect(secondPage.status).toBe(200);
+    expect(secondPage.body.items).toHaveLength(1);
+    expect(secondPage.body.nextCursor).toBeNull();
   });
 });
 

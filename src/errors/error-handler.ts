@@ -1,23 +1,26 @@
 import type { NextFunction, Request, Response } from "express";
-import type { Logger } from "@/infra/logger.js";
+import { logger } from "@/infra/logger.js";
 import { AppError, ValidationError } from "./app-error.js";
+import type { ErrorResponse } from "./error-response.schema.js";
 
-export function createErrorHandler(logger: Logger) {
+export function createErrorHandler() {
   return (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof AppError) {
-      res.status(err.statusCode).json({
+      const body: ErrorResponse = {
         error: {
           code: err.code,
           message: err.message,
           ...(err instanceof ValidationError ? { issues: err.issues } : {}),
         },
-      });
+      };
+      res.status(err.statusCode).json(body);
       return;
     }
 
     logger.error({ error: err }, "unhandled error");
-    res.status(500).json({
+    const body: ErrorResponse = {
       error: { code: "INTERNAL_ERROR", message: "internal server error" },
-    });
+    };
+    res.status(500).json(body);
   };
 }

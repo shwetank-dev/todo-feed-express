@@ -63,7 +63,7 @@ export function createAuthService(dbClient: DbClient) {
         return null;
       }
 
-      return createToken(user.id);
+      return user;
     },
 
     me: async (userId: string) => {

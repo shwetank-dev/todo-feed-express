@@ -1,5 +1,6 @@
 import express from "express";
 import helmet from "helmet";
+import swaggerUi from "swagger-ui-express";
 import { createErrorHandler } from "@/errors/error-handler.js";
 import type { DbClient } from "@/infra/db-client.js";
 import { dbHealthCheck } from "@/infra/db-client.js";
@@ -11,6 +12,7 @@ import {
   createTodoRoutes,
 } from "@/modules/todos/todos.routes.js";
 import { createTodoService } from "@/modules/todos/todos.service.js";
+import { openApiDocument } from "@/openapi.js";
 
 export function createApp(dbClient: DbClient, logger: Logger) {
   const app = express();
@@ -30,6 +32,8 @@ export function createApp(dbClient: DbClient, logger: Logger) {
     res.json({ server: "ok", db: isDbOk });
   });
 
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openApiDocument));
+
   const authService = createAuthService(dbClient);
   app.use("/api/auth", createAuthRoutes(authService));
 
@@ -41,7 +45,7 @@ export function createApp(dbClient: DbClient, logger: Logger) {
     res.status(404).json({ error: "not found" });
   });
 
-  app.use(createErrorHandler(logger));
+  app.use(createErrorHandler());
 
   return app;
 }

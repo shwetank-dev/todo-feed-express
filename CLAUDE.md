@@ -32,26 +32,104 @@ own schema, service, routes, and Zod validation together:
 
 ```
 src/
-  config.ts      # singular composition-root files stay flat at src/ root —
-  db.ts          # cardinality rule: one-of-a-kind infra (db, config, logger)
-  logger.ts      # doesn't multiply, so no folder needed for it
-  server.ts      # composition root: builds db, realtime adapter, wires modules
+  app.ts         # composition root: builds the Express app (no .listen())
+  server.ts      # real entry point: builds app.ts with real deps, calls .listen()
+  infra/         # external-system wiring, app-specific (not generic/reusable) —
+    config.ts    # config.ts/db-client.ts/logger.ts/sentry.ts grouped here since
+    db-client.ts # they all connect *this app* to something outside it (env,
+    logger.ts    # postgres, pino, sentry). db-client.ts and logger.ts are
+    sentry.ts    # factory-only + one singleton each, not DI'd — see Stage 1.6.
+  errors/        # internal error-handling convention, not external wiring —
+    app-error.ts     # AppError base + NotFoundError/UnauthenticatedError/
+    error-handler.ts # ConflictError/ValidationError; error-handler.ts is the
+                     # one central Express error middleware, depends on
+                     # app-error.ts and nothing else uses either file directly.
+  lib/           # generic, reusable helpers with zero domain knowledge and
+    pagination.ts # zero external I/O (not infra, not a domain module) —
+                  # three exports (Stage 2.1b): createPaginatedResponseSchema
+                  # (item) → { items, nextCursor } (cursor-based, not
+                  # page/pageSize/total — cheaper, no count query needed);
+                  # createPaginationQuerySchema(defaultLimit?) → validates the
+                  # { cursor?, limit } query params a paginated GET route
+                  # accepts; and paginateRows(rows, limit) → the shared
+                  # "fetch limit+1, slice, take the last row's id as
+                  # nextCursor" logic every cursor-paginated service query
+                  # needs (first used by todos.service.ts's
+                  # getListsByOwner, added when GET /api/lists was wired up
+                  # — the query construction itself stays in each service,
+                  # since that part IS DB/table-specific, only the generic
+                  # post-processing moved here). Used by any module's
+                  # validation.ts/service.ts. Deliberately NOT a place for
+                  # domain-specific schemas — that's still the "no global
+                  # schemas folder" rule from above; lib/ only
+                  # holds helpers with no knowledge of any specific entity.
+    validate-request.ts # getValidatedBody(req, schema) / getValidatedQuery
+                  # (req, schema) (Phase 2.2) — NOT middleware. Each does
+                  # runtime validation (schema.safeParse, throws
+                  # ValidationError on failure) AND returns the compile-time
+                  # `z.infer<T>`-typed result in one call — called directly
+                  # at the top of a handler, e.g.
+                  # `const { name } = getValidatedBody(req, createListSchema);`.
+                  # User's explicit call, after weighing a middleware-based
+                  # `validateBody`/`validateQuery` approach (rejected):
+                  # middleware can validate `req.body`/`req.query` at
+                  # runtime, but can't propagate a narrowed TYPE into a
+                  # separately-defined handler function — Express's own
+                  # `req.body`/`req.query` types don't know a validator ran
+                  # earlier in the chain (this is *not* a problem for
+                  # `req.body` specifically, only because Express types it
+                  # as bare `any` — an absence of type-checking, not real
+                  # propagated safety). Doing both steps in one function
+                  # call sidesteps that entirely: `schema` is used at
+                  # runtime (`schema.safeParse(...)`) and also drives the
+                  # generic `T`, so `z.infer<T>` gives back the real
+                  # inferred type directly — no assertion function or
+                  # explicit `Request<...>` annotation needed on the
+                  # handler's signature.
+    assert-param.ts # assertParam(req, name) — a TypeScript assertion
+                  # function (`asserts req is Request<Record<K, string>>`,
+                  # generic over the literal param name K so calling
+                  # `assertParam(req, "id")` narrows specifically
+                  # `req.params.id`, not just some arbitrary string key) —
+                  # throws a plain Error (not an AppError) if the param is
+                  # missing, since that means the route pattern itself is
+                  # wrong (a programmer bug caught at the trust boundary, not
+                  # a user-facing 4xx) — replaces `req.params.id as string`
+                  # casts; call once at the top of a handler
+                  # (`assertParam(req, "id");`), then every `req.params.id`
+                  # reference after that is narrowed to plain `string`.
+                  # Deliberately does NOT validate the param is a
+                  # well-formed UUID (e.g. reject `/lists/foo`) — user's
+                  # explicit call: a malformed ID should 404 like any other
+                  # nonexistent resource, not 400, matching the existing
+                  # rule that this app never distinguishes "doesn't exist"
+                  # from "malformed" to avoid leaking which case it is.
   modules/
     users/
       schema.ts    # Drizzle table(s) for this domain
       service.ts   # business logic, depends on db/logger via params
       routes.ts    # thin Express routes, call the service
       validation.ts # Zod input schemas for this module's routes (Stage 2+)
+      dto.ts       # Zod output/response schemas (Stage 2.1b) — split out
+                   # from validation.ts once it became clear input and
+                   # output are different concerns (validation.ts = what do
+                   # I reject, dto.ts = what do I shape for the client),
+                   # user's explicit call after weighing keeping them
+                   # combined. A module only gets the file it needs — users
+                   # has dto.ts (userResponseSchema) but no validation.ts
+                   # yet, since there's no users-owned input route.
     todos/
       schema.ts    # todo_lists + todos tables
       service.ts   # TodoService
       routes.ts
       validation.ts
+      dto.ts
     feed/
       schema.ts    # follows, activities, likes, comments (Stage 3)
       service.ts
       routes.ts
       validation.ts
+      dto.ts
   realtime/        # RealtimeAdapter interface + SocketAdapter + FirestoreAdapter
                     # (Stage 4) — cross-cutting infra used by multiple modules,
                     # not owned by a single domain, so it stays its own
@@ -290,6 +368,20 @@ tests.
   **404 handler** (`app.use((_req, res) => res.status(404).json(...))`,
   the very last middleware in `app.ts`, so it only fires for requests
   nothing else matched).
+- Actual state (routes were reshaped after this phase, during Stage 1.6's
+  work — documented here since this is where routes live conceptually):
+  routes moved under `/api/*` prefixes, each router owning its own path
+  space so `requireAuth` (applied via `router.use(requireAuth)` per router)
+  can never leak onto a route it wasn't meant for regardless of mount
+  order — this replaced an earlier version where `/health` briefly got
+  shadowed by `requireAuth` because everything was mounted at bare `/`.
+  Final shape: `/api/auth/*` (register, login, `/me`), `/api/lists`
+  (`POST /`, `GET /` — the caller's own lists, no `:id` needed since it can
+  only ever be the caller's own `userId`, `GET /:id`, `POST /:id/todos`),
+  `/api/todos/:id` (`PATCH` toggle, `DELETE`) — todos addressed flatly by
+  their own ID, not nested under their list. The originally-planned
+  `GET /users/:id/lists` was dropped entirely in favor of `GET /api/lists`
+  for this reason. `/health` stays unprefixed, outside `/api`.
 
 Offer a Stage 1 summary before moving on.
 
@@ -361,6 +453,22 @@ machinery, that's scope creep — stop and flag it, don't build it.
 - Completion (Stage 1.5 done when): every mutating route from Stage 1 is
   behind `requireAuth`, and `userId` is never taken from client-supplied
   input anywhere in the codebase again.
+- Actual state (added during Stage 2, revisited here since it's this
+  phase's concern): route handlers originally read `req.userId as string`
+  — a type-level lie, since `userId?: string` is genuinely optional in the
+  `Express.Request` augmentation and TS can't know `requireAuth` ran first.
+  Replaced with `assertUserId(req)`, added alongside `requireAuth` in
+  `auth.middleware.ts` — a TypeScript **assertion function**
+  (`asserts req is Request & { userId: string }`), not a value-returning
+  helper. Called once at the top of a handler (`assertUserId(req);`), it
+  throws `UnauthenticatedError` if `req.userId` is missing, and afterward
+  every `req.userId` reference in that function is narrowed to plain
+  `string` by TS's control-flow analysis — no `getUserId(req)` call
+  needed at each use site, no cast. Same trust-boundary reasoning as
+  before (fail loud instead of silently coercing `undefined`), just a
+  different mechanism for surfacing the narrowed type to the rest of the
+  function. See `lib/assert-param.ts` below for the equivalent treatment
+  of `req.params`.
 
 Offer a Stage 1.5 summary before moving on to Stage 2.
 
@@ -373,28 +481,44 @@ for production bugs beyond a health check — Sentry gives visibility into
 those without hand-checking logs. Not worth adding earlier; there's nothing
 meaningful to monitor before real routes exist.
 
-### Phase 1.6.1 — Install & init
+### Phase 1.6.1 — Install & init ✅ DONE
 - Task: install `@sentry/node`; call `Sentry.init(...)` at the very top of
   `server.ts`, before anything else — same composition-root instinct as
   `config.ts`/`logger.ts`. DSN comes from a new Zod-validated env var in
   `config.ts` (e.g. `SENTRY_DSN`), not hardcoded.
 - Completion: a deliberately thrown test error shows up in the Sentry
   dashboard.
+- Actual state: `Sentry.init(...)` lives in its own `src/infra/sentry.ts`
+  (`initSentry(config)`), not inline in `server.ts` — kept `server.ts` from
+  accumulating unrelated setup code. `SENTRY_DSN` is `.optional()` in
+  `configSchema` (not required like `DATABASE_URL`/`JWT_SECRET`) — a
+  missing DSN is a safe no-op (Sentry's SDK just doesn't send anything),
+  unlike the other fields where a missing value means the app genuinely
+  can't function; this means no Sentry account is needed to keep
+  developing locally. Verified via a temporary `GET /debug-sentry` route
+  that threw a test error, confirmed in the dashboard, then removed.
 
-### Phase 1.6.2 — Environment + sampling
+### Phase 1.6.2 — Environment + sampling ✅ DONE
 - Task: pass `environment: config.ENVIRONMENT` into `Sentry.init(...)`, and
   set a conservative `tracesSampleRate` for production (not `1.0` — that's
   expensive/noisy at real traffic volume).
 - Completion: dev errors and prod errors are distinguishable in Sentry via
   the environment tag.
+- Actual state: `tracesSampleRate` is `0.1` in production, `1.0` everywhere
+  else (no real traffic to worry about outside prod).
 
-### Phase 1.6.3 — Scrub sensitive data
+### Phase 1.6.3 — Scrub sensitive data ✅ DONE
 - Task: use Sentry's `beforeSend` hook to strip passwords, tokens, and the
   DB connection string out of captured request/error data before it's sent.
 - Completion: a manually triggered error containing a fake secret in its
   payload does not show that secret in the Sentry dashboard.
+- Actual state: `beforeSend` redacts a `password` field on `event.request.data`,
+  the `Authorization` header, and does a literal string-replace of
+  `config.DATABASE_URL` across the whole serialized event (catches the
+  connection string if it ever surfaces inside an error message, e.g. a
+  raw Postgres connection error).
 
-### Phase 1.6.4 — Operational vs unexpected errors (design checkpoint)
+### Phase 1.6.4 — Operational vs unexpected errors (design checkpoint) ✅ DONE
 - Concept: not every error is a bug. A 400 from bad input (Stage 2's
   `validateBody`) or a 401 from `requireAuth` is expected, user-facing
   behavior — reporting those to Sentry as "errors" is just noise. This is
@@ -406,8 +530,50 @@ meaningful to monitor before real routes exist.
   the unexpected ones.
 - Completion: a validation 400 does not create a Sentry event; a genuinely
   unhandled exception does.
+- Actual state, built out further than the roadmap's original sketch:
+  `src/errors/app-error.ts` has `AppError` (base: `statusCode`, `code`,
+  `message` — `code` is a stable, language-agnostic string a frontend can
+  switch on for i18n, distinct from `message`, which is a human-readable
+  fallback/log detail only) plus `NotFoundError` (404),
+  `UnauthenticatedError` (401 — named for what it actually means per HTTP
+  semantics, not "Unauthorized"; there's no `ForbiddenError`/403 in this
+  app since the one case that would map to it — hitting another user's
+  list/todo — deliberately returns 404 instead, to avoid leaking existence
+  to an unauthorized caller), `ConflictError` (409, `code` passed in
+  per-instance since many distinct conflicts can share one status),
+  and `ValidationError` (400, fixed `code: "VALIDATION_ERROR"`, required
+  `issues: {path, message}[]` — shaped to closely match Zod's own issue
+  format, for Stage 2). `src/errors/error-handler.ts` is the one central
+  Express error-handling middleware (last in the chain in `app.ts`):
+  `AppError` → its own status/code/message (+ `issues` if present);
+  anything else → `logger.error(...)` + generic `500`.
+  All call sites migrated to throw these instead of building responses
+  inline (`auth.service.ts`, `requireAuth`, `auth.routes.ts`,
+  `todos.routes.ts`).
+- Further deviation: Sentry reporting is routed **through the logger**,
+  not via `Sentry.setupExpressErrorHandler(app)` (which was removed after
+  adding this, to avoid double-reporting the same error via two paths).
+  `src/infra/logger.ts` exposes only `info`/`warn`/`error`/`fatal` (hides
+  Pino's full API — no child loggers, no `trace`/`debug`, no string-only
+  overload; `payload` and `message` both required), and its `error`/
+  `fatal` internally call `reportError` from `src/infra/sentry.ts`
+  (`Sentry.captureException` if `payload.error instanceof Error`, else
+  `Sentry.captureMessage`). This is the one, single path anything takes to
+  reach Sentry now. `logger.ts` and `db-client.ts` are deliberately
+  **not** DI'd (unlike `dbClient`, which genuinely needs swapping between
+  dev/test/prod) — `logger` is a conventional bare-imported singleton,
+  matching how most plain-Express (non-DI-framework) codebases treat
+  logging; `db-client.ts` lost its own singleton export and is
+  factory-only now (`createDbClient`), since nothing bare-imports a
+  pre-built `dbClient` anymore — `server.ts` and `tests/setup.ts` each
+  construct their own.
+  Fixed a circular import this created (`config.ts` → `logger.ts` →
+  `sentry.ts` → `config.ts`): `config.ts`'s own bootstrap-failure path
+  uses plain `console.error` instead of the logger (a config validator
+  shouldn't depend on infra that itself depends on that same config), and
+  `initSentry` takes `config` as a parameter instead of importing it.
 
-### Phase 1.6.5 — Middleware ordering, releases, source maps
+### Phase 1.6.5 — Middleware ordering, releases, source maps — DEFERRED
 - Task: wire Sentry's request handler early in the Express middleware
   chain, and its error handler after all routes but before your own final
   error-handling middleware. Tag each deploy with a release
@@ -416,8 +582,18 @@ meaningful to monitor before real routes exist.
   JS.
 - Completion (Stage 1.6 done when): a deployed error shows the correct
   original TypeScript file/line in Sentry, tagged with the correct release.
+- **Deliberately skipped, not an oversight**: user's explicit call — this
+  build is a straightforward `tsc` transpile, not a minified/bundled
+  frontend build, so compiled `dist/*.js` stays close in structure to the
+  source; the readability payoff of source maps is much smaller here than
+  the setup cost (Sentry CLI, auth tokens, a build-step integration).
+  Revisit only if Sentry stack traces become genuinely hard to read in
+  practice. Release/commit-SHA tagging also not done. The middleware-
+  ordering part is moot — there's no `Sentry.setupExpressErrorHandler`
+  anymore (see 1.6.4's note on routing Sentry through the logger instead).
 
-Offer a Stage 1.6 summary before moving on to Stage 2.
+Stage 1.6 considered done (1.6.1–1.6.4 complete, 1.6.5 deliberately
+deferred). Move on to Stage 2.
 
 ---
 
@@ -427,12 +603,60 @@ Motivation: this is the glue layer between the DB shape, API validation, and
 (eventually) a client's expectations — one contract instead of three
 independently-drifting definitions.
 
+User's explicit call: **both input and output schemas are part of the
+contract**, not just request-body validation. A route's response shape is
+just as much a source of drift (service returns an extra field, or drops
+one, and nothing catches it) as its input. This also means Stage 2.5's
+generated OpenAPI docs describe both directions, not just request bodies.
+
+Further deviation, decided once output schemas were actually being built
+(not upfront): input and output schemas live in **separate files per
+module** — `validation.ts` (input + query schemas, what a route rejects)
+and `dto.ts` (output/response schemas, what a route shapes for the
+client) — rather than both in `validation.ts` as originally sketched
+below. Reasoning: they're different concerns even though both are Zod,
+and combining them risked `validation.ts` becoming a junk drawer as
+modules grow (Stage 3's `feed` module especially). A module only gets the
+file it actually needs — e.g. `users` has `dto.ts` (`userResponseSchema`)
+but no `validation.ts`, since there's no users-owned input route yet.
+
 ### Phase 2.1 — Input schemas
 - Task: Zod schemas for each entity's input shape (e.g. `CreateTodoInput`,
   `UpdateTodoInput`) in that module's `validation.ts` (e.g.
   `src/modules/todos/validation.ts`) — colocated with the module, not in a
   global schemas folder — that validate incoming request bodies.
 - Completion: a schema exists for every mutating route from Stage 1.
+
+### Phase 2.1b — Output schemas
+- Problem: without a schema for what a route *returns*, the response shape
+  can silently drift from what the DB/service actually produces (an extra
+  internal field leaks out, a renamed column breaks a client silently) —
+  nothing catches it the way input validation catches bad requests.
+- Task: Zod schemas for each entity's output shape (e.g. `TodoResponse`,
+  `ListResponse`) in that module's `dto.ts` (see file-split note above),
+  for every route that returns a body (not just mutating ones — `GET`
+  routes need these too).
+- Check question: "should the output schema ever be the exact same object
+  as the input schema? what fields typically differ (e.g. server-generated
+  `id`, `createdAt`) and why shouldn't a client be able to send those in a
+  request body?"
+- Completion: a schema exists describing the response shape of every route
+  that returns JSON, including `GET` routes.
+- Actual state: enforced at runtime, not just typed — every route calls
+  `theResponseSchema.parse(data)` immediately before `res.json(...)`, e.g.
+  `res.json(userResponseSchema.parse(user))` in `auth.routes.ts`. This
+  replaced the earlier ad hoc `const { passwordHash, ...safeUser } = user;`
+  destructuring, which only worked because someone remembered to write it
+  at each call site — `userResponseSchema.parse(user)` makes leaking
+  `passwordHash` structurally impossible instead of dependent on memory,
+  since Zod strips any key not declared in the schema. Deliberately
+  *unlike* `errorResponseSchema` (Phase 1.6.4/`errors/error-response.schema.ts`)
+  — that one is compile-time-only, no runtime `.parse()`, because
+  `error-handler.ts` is the last line of defense with no further
+  middleware to catch a thrown `ZodError`. Ordinary routes don't have that
+  problem: a shape mismatch there is a genuine bug, and it correctly falls
+  through to `error-handler.ts`'s existing "unhandled error → 500 + Sentry"
+  path, same as any other unexpected exception.
 
 ### Phase 2.2 — `validateBody` middleware (DI checkpoint)
 - Problem: without a shared middleware, every route re-implements its own
@@ -483,8 +707,9 @@ the moment someone changes a schema and forgets to update them).
   (e.g. `zod-to-openapi`, or Zod v4's built-in `z.toJSONSchema()`) as the
   bridge.
 - Completion: an OpenAPI JSON/YAML document exists, generated from the
-  existing validation schemas, describing every mutating route's input
-  shape.
+  existing validation schemas, describing every route's input shape
+  (request body) **and** output shape (response body) — both directions
+  of the contract from Phase 2.1/2.1b.
 
 ### Phase 2.5.2 — Serve interactive docs
 - Task: mount `swagger-ui-express` (or similar) at a route like `GET /docs`,

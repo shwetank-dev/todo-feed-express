@@ -1,49 +1,64 @@
 import { Router } from "express";
 import { NotFoundError } from "@/errors/app-error.js";
-import { requireAuth } from "@/modules/auth/auth.middleware.js";
+import { assertParam } from "@/lib/assert-param.js";
+import { getValidatedBody, getValidatedQuery } from "@/lib/validate-request.js";
+import { assertUserId, requireAuth } from "@/modules/auth/auth.middleware.js";
+import {
+  paginatedTodoListsResponseSchema,
+  todoListResponseSchema,
+  todoResponseSchema,
+} from "./todos.dto.js";
 import type { TodoService } from "./todos.service.js";
+import {
+  addTodoSchema,
+  createListSchema,
+  listTodosQuerySchema,
+} from "./todos.validation.js";
 
 export function createListRoutes(todoService: TodoService) {
   const router = Router();
   router.use(requireAuth);
 
   router.post("/", async (req, res) => {
-    const { name } = req.body;
-    const list = await todoService.createList(req.userId as string, name);
-    res.status(201).json(list);
+    assertUserId(req);
+    const { name } = getValidatedBody(req, createListSchema);
+    const list = await todoService.createList(req.userId, name);
+    res.status(201).json(todoListResponseSchema.parse(list));
   });
 
   router.get("/", async (req, res) => {
-    const lists = await todoService.getListsByOwner(req.userId as string);
-    res.json(lists);
+    assertUserId(req);
+    const { cursor, limit } = getValidatedQuery(req, listTodosQuerySchema);
+    const lists = await todoService.getListsByOwner(req.userId, {
+      cursor,
+      limit,
+    });
+    res.json(paginatedTodoListsResponseSchema.parse(lists));
   });
 
   router.get("/:id", async (req, res) => {
-    const list = await todoService.getListById(
-      req.params.id as string,
-      req.userId as string,
-    );
+    assertUserId(req);
+    assertParam(req, "id");
+    const list = await todoService.getListById(req.params.id, req.userId);
 
     if (!list) {
       throw new NotFoundError("list not found");
     }
 
-    res.json(list);
+    res.json(todoListResponseSchema.parse(list));
   });
 
   router.post("/:id/todos", async (req, res) => {
-    const { text } = req.body;
-    const todo = await todoService.addTodo(
-      req.params.id as string,
-      text,
-      req.userId as string,
-    );
+    assertUserId(req);
+    assertParam(req, "id");
+    const { text } = getValidatedBody(req, addTodoSchema);
+    const todo = await todoService.addTodo(req.params.id, text, req.userId);
 
     if (!todo) {
       throw new NotFoundError("list not found");
     }
 
-    res.status(201).json(todo);
+    res.status(201).json(todoResponseSchema.parse(todo));
   });
 
   return router;
@@ -54,29 +69,27 @@ export function createTodoRoutes(todoService: TodoService) {
   router.use(requireAuth);
 
   router.patch("/:id", async (req, res) => {
-    const todo = await todoService.toggleTodo(
-      req.params.id as string,
-      req.userId as string,
-    );
+    assertUserId(req);
+    assertParam(req, "id");
+    const todo = await todoService.toggleTodo(req.params.id, req.userId);
 
     if (!todo) {
       throw new NotFoundError("todo not found");
     }
 
-    res.json(todo);
+    res.json(todoResponseSchema.parse(todo));
   });
 
   router.delete("/:id", async (req, res) => {
-    const todo = await todoService.deleteTodo(
-      req.params.id as string,
-      req.userId as string,
-    );
+    assertUserId(req);
+    assertParam(req, "id");
+    const todo = await todoService.deleteTodo(req.params.id, req.userId);
 
     if (!todo) {
       throw new NotFoundError("todo not found");
     }
 
-    res.json(todo);
+    res.json(todoResponseSchema.parse(todo));
   });
 
   return router;
