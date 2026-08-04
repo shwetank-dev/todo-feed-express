@@ -1,10 +1,11 @@
 import { and, eq, gt, sql } from "drizzle-orm";
-import type { DbClient } from "@/infra/db-client.js";
+import { NotFoundError } from "@/errors/app-error.js";
+import type { QueryClient } from "@/infra/db-client.js";
 import { paginateRows } from "@/lib/pagination.js";
 import { todoLists, todos } from "./todos.db-schema.js";
 import type { ListTodosQuery } from "./todos.validation.js";
 
-export function createTodoService(dbClient: DbClient) {
+export function createTodoService(dbClient: QueryClient) {
   return {
     createList: async (ownerId: string, name: string) => {
       const [list] = await dbClient
@@ -21,7 +22,7 @@ export function createTodoService(dbClient: DbClient) {
         .where(eq(todoLists.id, listId));
 
       if (!list || list.ownerId !== ownerId) {
-        return null;
+        throw new NotFoundError("list not found");
       }
 
       return list;
@@ -42,7 +43,7 @@ export function createTodoService(dbClient: DbClient) {
         .orderBy(todoLists.id)
         .limit(limit + 1);
 
-      return paginateRows(rows, limit);
+      return paginateRows(rows, limit, (row) => row.id);
     },
 
     addTodo: async (listId: string, text: string, ownerId: string) => {
@@ -52,7 +53,7 @@ export function createTodoService(dbClient: DbClient) {
         .where(eq(todoLists.id, listId));
 
       if (!list || list.ownerId !== ownerId) {
-        return null;
+        throw new NotFoundError("list not found");
       }
 
       const [todo] = await dbClient
@@ -70,7 +71,7 @@ export function createTodoService(dbClient: DbClient) {
         .where(eq(todos.id, todoId));
 
       if (!row || row.ownerId !== ownerId) {
-        return null;
+        throw new NotFoundError("todo not found");
       }
 
       const [todo] = await dbClient
@@ -78,6 +79,11 @@ export function createTodoService(dbClient: DbClient) {
         .set({ done: sql`not ${todos.done}` })
         .where(eq(todos.id, todoId))
         .returning();
+
+      if (!todo) {
+        throw new Error("update returned no row");
+      }
+
       return todo;
     },
 
@@ -89,7 +95,7 @@ export function createTodoService(dbClient: DbClient) {
         .where(eq(todos.id, todoId));
 
       if (!row || row.ownerId !== ownerId) {
-        return null;
+        throw new NotFoundError("todo not found");
       }
 
       const [todo] = await dbClient

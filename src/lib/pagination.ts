@@ -14,12 +14,14 @@ export function createPaginationQuerySchema(defaultLimit = 20) {
   });
 }
 
-export function paginateRows<T extends { id: string }>(
+export function paginateRows<T>(
   rows: T[],
   limit: number,
+  getCursor: (row: T) => string,
 ): { items: T[]; nextCursor: string | null } {
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
-  const nextCursor = hasMore ? (items.at(-1)?.id ?? null) : null;
+  const lastItem = items.at(-1);
+  const nextCursor = hasMore && lastItem ? getCursor(lastItem) : null;
   return { items, nextCursor };
 }

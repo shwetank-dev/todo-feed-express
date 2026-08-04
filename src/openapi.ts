@@ -3,6 +3,14 @@ import { errorResponseSchema } from "@/errors/error-response.schema.js";
 import { authResponseSchema } from "@/modules/auth/auth.dto.js";
 import { loginSchema, registerSchema } from "@/modules/auth/auth.validation.js";
 import {
+  commentResponseSchema,
+  paginatedActivitiesResponseSchema,
+} from "@/modules/feed/feed.dto.js";
+import {
+  addCommentSchema,
+  feedQuerySchema,
+} from "@/modules/feed/feed.validation.js";
+import {
   paginatedTodoListsResponseSchema,
   todoListResponseSchema,
   todoResponseSchema,
@@ -56,6 +64,7 @@ export const openApiDocument = {
     { name: "Auth", description: "Registration, login, and identity" },
     { name: "Lists", description: "Todo lists" },
     { name: "Todos", description: "Todos within a list" },
+    { name: "Feed", description: "Following lists and the activity feed" },
   ],
   components: {
     securitySchemes: {
@@ -125,6 +134,83 @@ export const openApiDocument = {
         parameters: idParam,
         responses: {
           "200": jsonBody(todoResponseSchema),
+          "401": errorResponse,
+          "404": errorResponse,
+        },
+      },
+    },
+    "/api/lists/{id}/follow": {
+      post: {
+        tags: ["Feed"],
+        parameters: idParam,
+        responses: {
+          "204": { description: "followed" },
+          "401": errorResponse,
+          "404": errorResponse,
+          "409": errorResponse,
+        },
+      },
+      delete: {
+        tags: ["Feed"],
+        parameters: idParam,
+        responses: {
+          "204": { description: "unfollowed" },
+          "401": errorResponse,
+          "404": errorResponse,
+        },
+      },
+    },
+    "/api/feed": {
+      get: {
+        tags: ["Feed"],
+        parameters: queryParams(feedQuerySchema),
+        responses: {
+          "200": jsonBody(paginatedActivitiesResponseSchema),
+          "400": errorResponse,
+          "401": errorResponse,
+        },
+      },
+    },
+    "/api/activities/{id}/like": {
+      post: {
+        tags: ["Feed"],
+        parameters: idParam,
+        responses: {
+          "204": { description: "liked" },
+          "401": errorResponse,
+          "404": errorResponse,
+          "409": errorResponse,
+        },
+      },
+      delete: {
+        tags: ["Feed"],
+        parameters: idParam,
+        responses: {
+          "204": { description: "unliked" },
+          "401": errorResponse,
+          "404": errorResponse,
+        },
+      },
+    },
+    "/api/activities/{id}/comments": {
+      post: {
+        tags: ["Feed"],
+        parameters: idParam,
+        requestBody: jsonBody(addCommentSchema),
+        responses: {
+          "201": jsonBody(commentResponseSchema),
+          "400": errorResponse,
+          "401": errorResponse,
+          "404": errorResponse,
+        },
+      },
+    },
+    "/api/comments/{id}": {
+      delete: {
+        tags: ["Feed"],
+        parameters: idParam,
+        responses: {
+          "200": jsonBody(commentResponseSchema),
           "401": errorResponse,
           "404": errorResponse,
         },

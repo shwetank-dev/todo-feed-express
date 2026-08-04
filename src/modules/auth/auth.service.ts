@@ -3,17 +3,18 @@ import { eq } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 import { ConflictError } from "@/errors/app-error.js";
 import { config } from "@/infra/config.js";
-import type { DbClient } from "@/infra/db-client.js";
+import type { QueryClient } from "@/infra/db-client.js";
+import { isUniqueViolation } from "@/infra/postgres-errors.js";
 import { users } from "../users/users.db-schema.js";
+import { AUTH_ERROR_CODE } from "./auth.dto.js";
 
 const SALT_ROUNDS = 10;
-const POSTGRES_UNIQUE_VIOLATION = "23505";
 
 export function createToken(userId: string) {
   return jwt.sign({ userId }, config.JWT_SECRET, { expiresIn: "1h" });
 }
 
-export function createAuthService(dbClient: DbClient) {
+export function createAuthService(dbClient: QueryClient) {
   return {
     register: async (name: string, password: string) => {
       const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -30,16 +31,9 @@ export function createAuthService(dbClient: DbClient) {
 
         return user;
       } catch (err) {
-        const cause = err instanceof Error ? err.cause : undefined;
-
-        if (
-          cause &&
-          typeof cause === "object" &&
-          "code" in cause &&
-          cause.code === POSTGRES_UNIQUE_VIOLATION
-        ) {
+        if (isUniqueViolation(err)) {
           throw new ConflictError(
-            "DUPLICATE_NAME",
+            AUTH_ERROR_CODE.DUPLICATE_NAME,
             `name "${name}" is already taken`,
           );
         }

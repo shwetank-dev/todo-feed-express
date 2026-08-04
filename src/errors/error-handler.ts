@@ -13,7 +13,7 @@ export function createErrorHandler() {
           ...(err instanceof ValidationError ? { issues: err.issues } : {}),
         },
       };
-      res.status(err.statusCode).json(body);
+      res.status(err.httpStatusCode).json(body);
       return;
     }
 
